@@ -2,7 +2,6 @@ import { useRef, useState, type ReactNode } from 'react'
 import {
   Check,
   Copy,
-  Crop,
   ImagePlus,
   Plus,
   Ruler,
@@ -317,18 +316,6 @@ export default function Sidebar(props: SidebarProps) {
                   <Button
                     size="icon"
                     variant="ghost"
-                    title="Golden ratio / compose"
-                    disabled={!m || !Number.isFinite(m.widthCm)}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      props.onOpenComposer(box.id)
-                    }}
-                  >
-                    <Crop size={15} />
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant="ghost"
                     title="Delete"
                     onClick={(e) => {
                       e.stopPropagation()
@@ -350,6 +337,23 @@ export default function Sidebar(props: SidebarProps) {
                       </span>
                     )}
                   </div>
+                )}
+                {m && Number.isFinite(m.widthCm) ? (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    className="mt-2 w-full"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      props.onOpenComposer(box.id)
+                    }}
+                  >
+                    <Sparkles size={14} /> Golden ratio & compose
+                  </Button>
+                ) : (
+                  <p className="mt-2 px-0.5 text-[11px] text-[var(--color-muted)]">
+                    Set the width reference (step 3) to unlock the golden-ratio editor.
+                  </p>
                 )}
               </div>
             )
