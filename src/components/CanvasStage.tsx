@@ -4,6 +4,7 @@ import type Konva from 'konva'
 import { useElementSize } from '@/hooks/useElementSize'
 import type { DesignBox, DesignMeasurement, Rect as RectType, ShirtRef } from '@/lib/types'
 import { SHIRT_OUTLINE_COLOR } from '@/lib/constants'
+import { cropToCanvas } from '@/lib/color'
 import { formatCm } from '@/lib/utils'
 
 export type DrawMode = 'none' | 'ref' | 'design'
@@ -230,6 +231,24 @@ export default function CanvasStage(props: CanvasStageProps) {
                 />
               )}
 
+              {/* Live golden-ratio / composed preview on the shirt itself. */}
+              {image &&
+                boxes.map((box) => {
+                  if (!box.print) return null
+                  const m = measurements.find((mm) => mm.id === box.id)
+                  if (!m || !Number.isFinite(m.widthCm) || m.widthCm <= 0) return null
+                  return (
+                    <PrintPreview
+                      key={`print-${box.id}`}
+                      image={image}
+                      box={box}
+                      measuredWidthCm={m.widthCm}
+                      measuredHeightCm={m.heightCm}
+                      scale={scale}
+                    />
+                  )
+                })}
+
               {boxes.map((box) => (
                 <Rect
                   key={box.id}
@@ -242,7 +261,7 @@ export default function CanvasStage(props: CanvasStageProps) {
                   height={box.height}
                   stroke={box.color}
                   strokeWidth={(selectedId === box.id ? 3 : 2) / scale}
-                  fill={`${box.color}1f`}
+                  fill={box.print ? 'transparent' : `${box.color}1f`}
                   draggable={drawMode === 'none'}
                   onMouseDown={(e) => {
                     if (drawMode !== 'none') return
@@ -280,9 +299,11 @@ export default function CanvasStage(props: CanvasStageProps) {
             {/* Labels drawn in stage coordinates so they stay readable at any zoom. */}
             {boxes.map((box) => {
               const m = measurements.find((mm) => mm.id === box.id)
-              const label = m && scaleReady
-                ? `${box.name}  ·  ${formatCm(m.widthCm)} × ${formatCm(m.heightCm)} cm`
-                : box.name
+              const label = box.print
+                ? `${box.name}  ·  ${formatCm(box.print.widthCm)} × ${formatCm(box.print.heightCm)} cm  ·  golden`
+                : m && scaleReady
+                  ? `${box.name}  ·  ${formatCm(m.widthCm)} × ${formatCm(m.heightCm)} cm`
+                  : box.name
               return (
                 <BoxLabel
                   key={`lbl-${box.id}`}
@@ -306,6 +327,63 @@ export default function CanvasStage(props: CanvasStageProps) {
         </Stage>
       )}
     </div>
+  )
+}
+
+/**
+ * Renders the print/golden-ratio frame composited onto the shirt at the design's
+ * location: a fill-colored rectangle (so shrinking the art shows no white space)
+ * with the cropped artwork scaled and offset inside it — mirroring the composer.
+ */
+function PrintPreview({
+  image,
+  box,
+  measuredWidthCm,
+  measuredHeightCm,
+  scale,
+}: {
+  image: HTMLImageElement
+  box: DesignBox
+  measuredWidthCm: number
+  measuredHeightCm: number
+  scale: number
+}) {
+  const art = useMemo(
+    () => cropToCanvas(image, box),
+    [image, box.x, box.y, box.width, box.height],
+  )
+  const print = box.print!
+  const pxPerCm = box.width / measuredWidthCm
+  const frameWpx = print.widthCm * pxPerCm
+  const frameHpx = print.heightCm * pxPerCm
+  const cx = box.x + box.width / 2
+  const cy = box.y + box.height / 2
+  const frameX = cx - frameWpx / 2
+  const frameY = cy - frameHpx / 2
+
+  // Artwork is contain-fit into the frame, then scaled by artScale (matches composer).
+  const fit = Math.min(print.widthCm / measuredWidthCm, print.heightCm / measuredHeightCm)
+  const artWpx = box.width * fit * print.artScale
+  const artHpx = box.height * fit * print.artScale
+  const artX = cx + print.offsetXCm * pxPerCm - artWpx / 2
+  const artY = cy + print.offsetYCm * pxPerCm - artHpx / 2
+
+  return (
+    <Group listening={false}>
+      <Rect x={frameX} y={frameY} width={frameWpx} height={frameHpx} fill={print.fillColor} />
+      <Group clipX={frameX} clipY={frameY} clipWidth={frameWpx} clipHeight={frameHpx}>
+        <KonvaImage image={art} x={artX} y={artY} width={artWpx} height={artHpx} />
+      </Group>
+      <Rect
+        x={frameX}
+        y={frameY}
+        width={frameWpx}
+        height={frameHpx}
+        stroke={box.color}
+        strokeWidth={2 / scale}
+        dash={[9 / scale, 6 / scale]}
+      />
+    </Group>
   )
 }
 
