@@ -1,16 +1,6 @@
 import type { Rect } from './types'
 
-/**
- * "Not the shirt" intensity. On a (near-)black shirt, real artwork is either
- * lighter (white clouds) or colored (red seals) — in both cases at least one
- * channel is well above the dark fabric. Using the max channel therefore
- * detects colored marks that plain luminance would miss.
- */
-function intensity(r: number, g: number, b: number): number {
-  return r > g ? (r > b ? r : b) : g > b ? g : b
-}
-
-/** Otsu's method: find the luminance threshold that best separates two classes. */
+/** Otsu's method: find the threshold that best separates two classes. */
 function otsuThreshold(histogram: number[], total: number): number {
   let sumAll = 0
   for (let i = 0; i < 256; i++) sumAll += i * histogram[i]
@@ -45,20 +35,35 @@ export interface SnapOptions {
   padding?: number
 }
 
+/** Median value of a 256-bin histogram. */
+function histogramMedian(hist: Int32Array, total: number): number {
+  const half = total / 2
+  let cum = 0
+  for (let v = 0; v < 256; v++) {
+    cum += hist[v]
+    if (cum >= half) return v
+  }
+  return 127
+}
+
 /**
- * Detect the tight bounding box of light artwork on a dark shirt inside a region
- * of interest. Works entirely at the image's NATIVE resolution (no downscaling):
+ * Detect the tight bounding box of artwork on a shirt of ANY color inside a
+ * region of interest. Works entirely at the image's NATIVE resolution:
  *
- *   1. Compute a per-pixel "not-the-shirt" intensity (max RGB channel), so both
- *      white artwork and colored seals stand out from the dark fabric.
- *   2. Otsu threshold (sensitivity-shiftable) to a binary artwork mask.
- *   3. Label 8-connected components; drop tiny specks and dim fabric-only blobs
- *      (a component must exceed an area floor AND contain a genuinely bright
- *      pixel), then take the union of the survivors.
- *   4. Snap fallback: if that union still fills a whole side of the ROI (bright
- *      fabric such as a collar/seam bridged into the mask), trim that axis to the
- *      dense body of the artwork via a projection profile — so a loosely drawn
- *      box still snaps instead of returning itself.
+ *   1. Estimate the fabric color from the ROI's border ring (the user draws
+ *      around the artwork, so the outer frame is mostly shirt). This makes the
+ *      detector color-agnostic — a white shirt, black shirt, or colored shirt
+ *      all work, because artwork is defined as "whatever deviates from fabric".
+ *   2. Build a per-pixel deviation map (max abs channel difference from fabric),
+ *      catching artwork that is lighter, darker, OR a different hue.
+ *   3. Otsu threshold (sensitivity-shiftable) to a binary artwork mask.
+ *   4. Label 8-connected components; drop tiny specks and low-deviation
+ *      fabric-only blobs (a component must exceed an area floor AND contain a
+ *      strongly-deviating pixel), then take the union of the survivors.
+ *   5. Snap fallback: if that union still fills a whole side of the ROI (fabric
+ *      such as a collar/seam bridged into the mask), trim that axis to the dense
+ *      body of the artwork via a projection profile — so a loosely drawn box
+ *      still snaps instead of returning itself.
  *
  * `roi` and the returned rect are in the image's ORIGINAL pixel space.
  * Returns null if no confident artwork is found.
@@ -89,12 +94,40 @@ export function detectArtworkBounds(
   const { data } = ctx.getImageData(0, 0, w, h)
 
   const n = w * h
+
+  // 1) Estimate fabric color from the ROI border ring (mostly shirt). Using the
+  //    per-channel median makes it robust to a little artwork touching an edge.
+  const margin = Math.max(1, Math.round(Math.min(w, h) * 0.06))
+  const rHist = new Int32Array(256)
+  const gHist = new Int32Array(256)
+  const bHist = new Int32Array(256)
+  let borderCount = 0
+  for (let y = 0; y < h; y++) {
+    const edgeRow = y < margin || y >= h - margin
+    for (let x = 0; x < w; x++) {
+      if (!edgeRow && x >= margin && x < w - margin) continue
+      const i = (y * w + x) * 4
+      rHist[data[i]]++
+      gHist[data[i + 1]]++
+      bHist[data[i + 2]]++
+      borderCount++
+    }
+  }
+  const bgR = histogramMedian(rHist, borderCount)
+  const bgG = histogramMedian(gHist, borderCount)
+  const bgB = histogramMedian(bHist, borderCount)
+
+  // 2) Per-pixel deviation from the fabric color (max abs channel diff), so
+  //    lighter, darker, and differently-colored artwork all register.
   const histogram = new Array(256).fill(0)
-  const intensityMap = new Uint8Array(n)
+  const devMap = new Uint8Array(n)
   for (let i = 0, p = 0; p < n; i += 4, p++) {
-    const l = intensity(data[i], data[i + 1], data[i + 2]) | 0
-    intensityMap[p] = l
-    histogram[l]++
+    const dr = Math.abs(data[i] - bgR)
+    const dg = Math.abs(data[i + 1] - bgG)
+    const db = Math.abs(data[i + 2] - bgB)
+    const d = dr > dg ? (dr > db ? dr : db) : dg > db ? dg : db
+    devMap[p] = d
+    histogram[d]++
   }
 
   // Otsu threshold; sensitivity 50 -> Otsu, higher -> lower threshold (fainter).
@@ -105,7 +138,7 @@ export function detectArtworkBounds(
   const mask = new Uint8Array(n)
   let maskCount = 0
   for (let p = 0; p < n; p++) {
-    if (intensityMap[p] > threshold) {
+    if (devMap[p] > threshold) {
       mask[p] = 1
       maskCount++
     }
@@ -114,9 +147,9 @@ export function detectArtworkBounds(
 
   // Absolute area floor: drop specks/sparkle but keep small real marks.
   const areaMin = Math.max(6, Math.round(n * 0.00006))
-  // A real print element contains a genuinely bright pixel; dim fabric-only
-  // blobs (isolated seams) are rejected even if large.
-  const brightGate = Math.min(254, base + 40)
+  // A real print element contains a strongly-deviating pixel; low-contrast
+  // fabric-only blobs (seams, shadows) are rejected even if large.
+  const strongGate = Math.min(254, base + 40)
 
   // 8-connected component labelling with an explicit stack.
   const labels = new Int32Array(n).fill(-1)
@@ -131,14 +164,14 @@ export function detectArtworkBounds(
     labels[start] = label
 
     let area = 0
-    let maxI = 0
+    let maxDev = 0
 
     while (sp > 0) {
       const p = stack[--sp]
       const px = p % w
       const py = (p / w) | 0
       area++
-      if (intensityMap[p] > maxI) maxI = intensityMap[p]
+      if (devMap[p] > maxDev) maxDev = devMap[p]
 
       for (let dy = -1; dy <= 1; dy++) {
         const ny = py + dy
@@ -156,7 +189,7 @@ export function detectArtworkBounds(
       }
     }
 
-    if (area >= areaMin && maxI >= brightGate) keptLabels.add(label)
+    if (area >= areaMin && maxDev >= strongGate) keptLabels.add(label)
     label++
   }
 

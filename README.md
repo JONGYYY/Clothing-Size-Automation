@@ -36,11 +36,11 @@ These match the manual Excel values. (Height uses the same width-anchored scale,
 
 When you add a design, drag a rough box over the print area. Detection runs at the image's **native resolution** (no downscaling) and:
 
-- Uses the max RGB channel so both white artwork and colored seals stand out from the dark fabric.
-- Applies **hysteresis thresholding** (Otsu-derived): it seeds on clearly-bright artwork pixels and grows into connected faint edges, so faint cloud wisps are kept while isolated faint fabric seams are dropped.
-- Labels connected components, discards specks/sparkle by area, and returns the union bounding box of the real artwork.
+- Is **color-agnostic**: it estimates the fabric color from the box's border ring, then measures each pixel's deviation from it (max abs channel difference). Artwork that is lighter, darker, or a different hue all register — so black, white, and colored shirts all work.
+- Applies an **Otsu threshold** to that deviation map, labels 8-connected components, and drops specks and low-contrast fabric-only blobs (a component must exceed an area floor and contain a strongly-deviating pixel).
+- Returns the union bounding box of the surviving artwork, with a projection-trim fallback that snaps a loosely drawn box to the dense body of the design instead of returning the box itself.
 
-A **sensitivity** slider tunes how faint an edge to include, the wand re-snaps, and the transform handles let you fine-tune. Tip: draw the box around the artwork (not across the collar/sleeve seams) for the tightest automatic fit.
+A **sensitivity** slider tunes how faint an edge to include, the wand re-snaps, and the transform handles let you fine-tune. Tip: draw the box around the artwork (keeping the border on plain fabric, not across the collar/sleeve seams) for the tightest automatic fit.
 
 ## Golden ratio composer & export
 
