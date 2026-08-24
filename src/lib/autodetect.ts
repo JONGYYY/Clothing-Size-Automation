@@ -35,25 +35,16 @@ export interface SnapOptions {
   padding?: number
 }
 
-/** Median value of a 256-bin histogram. */
-function histogramMedian(hist: Int32Array, total: number): number {
-  const half = total / 2
-  let cum = 0
-  for (let v = 0; v < 256; v++) {
-    cum += hist[v]
-    if (cum >= half) return v
-  }
-  return 127
-}
-
 /**
  * Detect the tight bounding box of artwork on a shirt of ANY color inside a
  * region of interest. Works entirely at the image's NATIVE resolution:
  *
- *   1. Estimate the fabric color from the ROI's border ring (the user draws
- *      around the artwork, so the outer frame is mostly shirt). This makes the
- *      detector color-agnostic — a white shirt, black shirt, or colored shirt
- *      all work, because artwork is defined as "whatever deviates from fabric".
+ *   1. Estimate the fabric color as the single most common color in the ROI.
+ *      Fabric is one near-uniform color while artwork is spread across many
+ *      colors, so the dominant color bin is the fabric even when the design is
+ *      large or touches the box edges. This makes the detector color-agnostic —
+ *      white, black, and colored shirts all work, because artwork is defined as
+ *      "whatever deviates from fabric".
  *   2. Build a per-pixel deviation map (max abs channel difference from fabric),
  *      catching artwork that is lighter, darker, OR a different hue.
  *   3. Otsu threshold (sensitivity-shiftable) to a binary artwork mask.
@@ -95,27 +86,40 @@ export function detectArtworkBounds(
 
   const n = w * h
 
-  // 1) Estimate fabric color from the ROI border ring (mostly shirt). Using the
-  //    per-channel median makes it robust to a little artwork touching an edge.
-  const margin = Math.max(1, Math.round(Math.min(w, h) * 0.06))
-  const rHist = new Int32Array(256)
-  const gHist = new Int32Array(256)
-  const bHist = new Int32Array(256)
-  let borderCount = 0
-  for (let y = 0; y < h; y++) {
-    const edgeRow = y < margin || y >= h - margin
-    for (let x = 0; x < w; x++) {
-      if (!edgeRow && x >= margin && x < w - margin) continue
-      const i = (y * w + x) * 4
-      rHist[data[i]]++
-      gHist[data[i + 1]]++
-      bHist[data[i + 2]]++
-      borderCount++
+  // 1) Estimate fabric color = the dominant color in the ROI. Quantize to
+  //    16 levels/channel, find the most populated bin, then average the exact
+  //    pixels in that bin for a precise fabric color.
+  const binHist = new Int32Array(4096)
+  for (let i = 0, p = 0; p < n; i += 4, p++) {
+    const bin = ((data[i] >> 4) << 8) | ((data[i + 1] >> 4) << 4) | (data[i + 2] >> 4)
+    binHist[bin]++
+  }
+  let domBin = 0
+  let domCount = -1
+  for (let b = 0; b < 4096; b++) {
+    if (binHist[b] > domCount) {
+      domCount = binHist[b]
+      domBin = b
     }
   }
-  const bgR = histogramMedian(rHist, borderCount)
-  const bgG = histogramMedian(gHist, borderCount)
-  const bgB = histogramMedian(bHist, borderCount)
+  const domR = (domBin >> 8) & 15
+  const domG = (domBin >> 4) & 15
+  const domB = domBin & 15
+  let sumR = 0
+  let sumG = 0
+  let sumB = 0
+  let domN = 0
+  for (let i = 0, p = 0; p < n; i += 4, p++) {
+    if ((data[i] >> 4) === domR && (data[i + 1] >> 4) === domG && (data[i + 2] >> 4) === domB) {
+      sumR += data[i]
+      sumG += data[i + 1]
+      sumB += data[i + 2]
+      domN++
+    }
+  }
+  const bgR = domN ? Math.round(sumR / domN) : domR << 4
+  const bgG = domN ? Math.round(sumG / domN) : domG << 4
+  const bgB = domN ? Math.round(sumB / domN) : domB << 4
 
   // 2) Per-pixel deviation from the fabric color (max abs channel diff), so
   //    lighter, darker, and differently-colored artwork all register.
@@ -147,9 +151,19 @@ export function detectArtworkBounds(
 
   // Absolute area floor: drop specks/sparkle but keep small real marks.
   const areaMin = Math.max(6, Math.round(n * 0.00006))
-  // A real print element contains a strongly-deviating pixel; low-contrast
-  // fabric-only blobs (seams, shadows) are rejected even if large.
-  const strongGate = Math.min(254, base + 40)
+  // A real print element contains a strongly-deviating pixel. The gate scales
+  // with the design's own contrast (the 99th-percentile deviation) so a pale,
+  // low-contrast design still passes while faint fabric shadows are rejected.
+  let cum = 0
+  let p99 = 255
+  for (let v = 0; v < 256; v++) {
+    cum += histogram[v]
+    if (cum >= n * 0.99) {
+      p99 = v
+      break
+    }
+  }
+  const strongGate = Math.min(254, threshold + Math.max(12, Math.min(45, 0.3 * (p99 - threshold))))
 
   // 8-connected component labelling with an explicit stack.
   const labels = new Int32Array(n).fill(-1)
