@@ -134,10 +134,24 @@ export function detectArtworkBounds(
     histogram[d]++
   }
 
-  // Otsu threshold; sensitivity 50 -> Otsu, higher -> lower threshold (fainter).
+  // Otsu gives the fabric/artwork split; p99 is the design's bold-deviation level.
   const base = otsuThreshold(histogram, n)
-  const shift = ((50 - sensitivity) / 50) * 30
-  const threshold = Math.max(1, Math.min(253, base + shift))
+  let cum = 0
+  let p99 = 255
+  for (let v = 0; v < 256; v++) {
+    cum += histogram[v]
+    if (cum >= n * 0.99) {
+      p99 = v
+      break
+    }
+  }
+
+  // The threshold NEVER drops below the Otsu split, otherwise near-uniform
+  // fabric noise gets masked and the box "snaps" to itself. Sensitivity below 50
+  // only makes it stricter (toward the bold-deviation level); 50+ stays at the
+  // fully-inclusive Otsu split.
+  const strict = Math.max(0, 50 - sensitivity) / 50
+  const threshold = Math.max(1, Math.min(253, Math.round(base + strict * 0.5 * (p99 - base))))
 
   const mask = new Uint8Array(n)
   let maskCount = 0
@@ -152,17 +166,8 @@ export function detectArtworkBounds(
   // Absolute area floor: drop specks/sparkle but keep small real marks.
   const areaMin = Math.max(6, Math.round(n * 0.00006))
   // A real print element contains a strongly-deviating pixel. The gate scales
-  // with the design's own contrast (the 99th-percentile deviation) so a pale,
-  // low-contrast design still passes while faint fabric shadows are rejected.
-  let cum = 0
-  let p99 = 255
-  for (let v = 0; v < 256; v++) {
-    cum += histogram[v]
-    if (cum >= n * 0.99) {
-      p99 = v
-      break
-    }
-  }
+  // with the design's own contrast so a pale, low-contrast design still passes
+  // while faint fabric shadows are rejected.
   const strongGate = Math.min(254, threshold + Math.max(12, Math.min(45, 0.3 * (p99 - threshold))))
 
   // 8-connected component labelling with an explicit stack.
